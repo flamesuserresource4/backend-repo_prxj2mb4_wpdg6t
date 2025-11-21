@@ -1,6 +1,5 @@
 import os
 import random
-import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional, Dict, Any
 
@@ -8,7 +7,7 @@ from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from database import db, create_document, get_documents
+from database import db, create_document
 from bson import ObjectId
 
 app = FastAPI(title="Price Compare API")
@@ -55,7 +54,7 @@ class SearchResponse(BaseModel):
 
 
 # -----------------------------
-# Utilities
+# Catalogs & Utilities
 # -----------------------------
 PLATFORMS = [
     "Amazon",
@@ -65,6 +64,22 @@ PLATFORMS = [
     "Meesho",
     "Tata Cliq",
     "Croma",
+]
+
+CATEGORIES = [
+    "Mobiles",
+    "Headphones",
+    "Laptops",
+    "Shoes",
+    "Fashion",
+    "Appliances",
+    "TVs",
+    "Wearables",
+]
+
+BRANDS = [
+    "Apple", "Samsung", "Sony", "Dell", "HP", "Lenovo", "Asus",
+    "Nike", "Adidas", "Puma", "Boat", "OnePlus", "Xiaomi"
 ]
 
 SAMPLE_IMAGES = [
@@ -155,7 +170,7 @@ def find_or_generate_prices(product_doc: Dict[str, Any]) -> List[Dict[str, Any]]
             })
         return out
     # Pull from DB
-    items = list(db["priceentry"].find({"product_id": str(product_doc["_id"])}))
+    items = list(db["priceentry"].find({"product_id": str(product_doc["_id"]) }))
     # if empty, seed now
     if not items:
         base = random.uniform(499, 49999)
@@ -188,6 +203,16 @@ def find_or_generate_prices(product_doc: Dict[str, Any]) -> List[Dict[str, Any]]
 @app.get("/")
 def read_root():
     return {"message": "Price Compare Backend running"}
+
+
+@app.get("/api/catalogs")
+def get_catalogs():
+    return {
+        "categories": CATEGORIES,
+        "brands": BRANDS,
+        "platforms": PLATFORMS,
+        "generated_at": datetime.now(timezone.utc)
+    }
 
 
 @app.get("/api/search", response_model=SearchResponse)
@@ -227,7 +252,7 @@ def search_products(
         }) for p in prices]
     )
 
-    return SearchResponse(
+    response = SearchResponse(
         query=q,
         results=[result],
         filters={
@@ -239,12 +264,57 @@ def search_products(
         generated_at=datetime.now(timezone.utc)
     )
 
+    # Persist search record (if DB available)
+    try:
+        if db is not None:
+            create_document("searchrecord", {
+                "query": q,
+                "brand": brand,
+                "category": category,
+                "price_min": price_min,
+                "price_max": price_max,
+                "results_count": len(result.platforms),
+            })
+    except Exception:
+        pass
+
+    return response
+
+
+@app.get("/api/search/recent")
+def recent_searches(limit: int = 8):
+    items: List[Dict[str, Any]] = []
+    if db is not None:
+        try:
+            cursor = db["searchrecord"].find({}).sort("created_at", -1).limit(limit)
+            for doc in cursor:
+                items.append({
+                    "query": doc.get("query"),
+                    "brand": doc.get("brand"),
+                    "category": doc.get("category"),
+                    "price_min": doc.get("price_min"),
+                    "price_max": doc.get("price_max"),
+                    "results_count": doc.get("results_count", 0),
+                    "created_at": doc.get("created_at"),
+                })
+        except Exception:
+            items = []
+    # Fallback sample if no DB
+    if not items:
+        samples = [
+            {"query": "iPhone 15", "brand": "Apple", "category": "Mobiles", "results_count": 6},
+            {"query": "Sony WH-1000XM5", "brand": "Sony", "category": "Headphones", "results_count": 5},
+            {"query": "MacBook Air", "brand": "Apple", "category": "Laptops", "results_count": 6},
+        ]
+        items = samples[:limit]
+    return {"items": items, "generated_at": datetime.now(timezone.utc)}
+
 
 @app.get("/api/trending")
 def trending_deals(limit: int = 6):
     # Generate or pull deals
     items = []
-    for i in range(limit):
+    for _ in range(limit):
         name = random.choice([
             "iPhone 15", "Samsung Galaxy S23", "Sony WH-1000XM5",
             "Nike Air Max", "Dell XPS 13", "MacBook Air M2"
